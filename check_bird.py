@@ -41,7 +41,13 @@ unknowns = []
 
 def _set_exitcode(code: Exitcode):
     global exitcode
-    if (code.value > exitcode.value) or (code == Exitcode.critical):
+    if code == Exitcode.critical:
+        exitcode = code
+    elif code == Exitcode.warning and exitcode != Exitcode.critical:
+        exitcode = code
+    elif code == Exitcode.unknown and exitcode not in (Exitcode.critical, Exitcode.warning):
+        exitcode = code
+    elif code == Exitcode.ok and exitcode not in (Exitcode.critical, Exitcode.warning, Exitcode.unknown):
         exitcode = code
 
 def _set_exitmsg(msg: str, code: Exitcode):
@@ -185,7 +191,7 @@ def _bird_status() -> bool:
         statusline = output.strip("\n").splitlines()[-1]
         if BIRDC_STATUS_OK in statusline:
             _set_exitmsg(BIRDC_STATUS_OK, Exitcode.ok)
-            _set_exitcode(Exitcode.ok)
+            exitcode = Exitcode.ok
             return True
         else:
             raise RunCommandError()
