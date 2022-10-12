@@ -277,7 +277,7 @@ def _ensure_protocols(
                 found = True
                 if v.state != 'up':
                     _set_exitcode(code)
-                    _set_exitmsg(f"Protocol {pattern} is not up", code)
+                    _set_exitmsg(f"Protocol {v.name} is not up", code)
         if not found:
             _set_exitcode(code)
             _set_exitmsg(f"Protocol {pattern} not found", code)
