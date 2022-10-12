@@ -31,9 +31,9 @@ class Exitcode(enum.Enum):
     unknown = 3
 
 
-exitcode = Exitcode.ok
-exitmsg = ''
+exitcode = Exitcode.unknown
 
+oks = []
 criticals = []
 warnings = []
 unknowns = []
@@ -53,10 +53,10 @@ def _set_exitmsg(msg: str, code: Exitcode):
         criticals.append(msg)
     elif code == Exitcode.warning:
         warnings.append(msg)
-    elif code == Exitcode.unknown:
-        unknowns.append(msg)
+    elif code == Exitcode.ok:
+        oks.append(msg)
     else:
-        exitmsg = f'{exitmsg};{msg}'
+        unknowns.append(msg)
 
 
 class BirdBFDSession():
@@ -184,13 +184,14 @@ def _bird_status() -> bool:
         output = _run(f'{BIRDC_PATH} show status')
         statusline = output.strip("\n").splitlines()[-1]
         if BIRDC_STATUS_OK in statusline:
-            exitmsg = BIRDC_STATUS_OK
+            _set_exitmsg(BIRDC_STATUS_OK, Exitcode.ok)
+            _set_exitcode(Exitcode.ok)
             return True
         else:
             raise RunCommandError()
     except RunCommandError:
-        exitcode = Exitcode.critical
-        exitmsg = 'BIRD is NOT running'
+        _set_exitcode(Exitcode.critical)
+        _set_exitmsg('BIRD is NOT running', Exitcode.critical)
         return False
 
 
@@ -259,7 +260,8 @@ def _exit() -> None:
     global criticals
     global warnings
     global unknowns
-    print(f"{exitcode.name.upper()}: {';'.join(criticals + warnings + unknowns + [exitmsg])}", file=sys.stdout, flush=True)
+    global oks
+    print(f"{exitcode.name.upper()}: {';'.join(criticals + warnings + unknowns + oks)}", file=sys.stdout, flush=True)
     sys.exit(exitcode.value)
 
 
@@ -323,7 +325,7 @@ def main() -> None:
 
     # check that bird is up and running, this will already set the exitcode and exitmsg if needed
     if not _bird_status():
-        return
+        _exit()
 
     # fetch routes from the given export_table only if needed
     routes_required = ('export_table', 'check_duplicates', 'print_duplicates')
@@ -371,6 +373,7 @@ def main() -> None:
         else:
             if args.print_duplicates:
                 print(f"No duplicate routes found.", file=sys.stderr, flush=True)
+
     _exit()
 
 
