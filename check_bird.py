@@ -4,13 +4,11 @@ import argparse
 import dateutil.parser
 import enum
 import ipaddress
-import pathlib
 import re
 import shlex
 import subprocess
 import sys
 import typing
-from pprint import pprint as pp
 
 
 t_IPAddr = typing.Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
@@ -36,16 +34,27 @@ class Exitcode(enum.Enum):
 exitcode = Exitcode.ok
 exitmsg = ''
 
+criticals = []
+warnings = []
+unknowns = []
+
 
 def _set_exitcode(code: Exitcode):
     global exitcode
     if (code.value > exitcode.value) or (code == Exitcode.critical):
         exitcode = code
 
-def _set_exitmsg(msg: str):
+def _set_exitmsg(msg: str, code: Exitcode):
     global exitmsg
-    if exitmsg == BIRDC_STATUS_OK:
-        exitmsg = msg
+    global criticals
+    global warnings
+    global unknowns
+    if code == Exitcode.critical:
+        criticals.append(msg)
+    elif code == Exitcode.warning:
+        warnings.append(msg)
+    elif code == Exitcode.unknown:
+        unknowns.append(msg)
     else:
         exitmsg = f'{exitmsg};{msg}'
 
@@ -244,9 +253,14 @@ def _print_route_list(route_list: t_RouteList) -> None:
             print(f"{str(route):<36s} | {','.join([str(x) for x in nexthops])}")
 
 
-def _exit(code: Exitcode, msg: typing.Union[str, None] = None) -> None:
-    print(f"{code.name.upper()}: {msg}", file=sys.stdout, flush=True)
-    sys.exit(code.value)
+def _exit() -> None:
+    global exitcode
+    global exitmsg
+    global criticals
+    global warnings
+    global unknowns
+    print(f"{exitcode.name.upper()}: {';'.join(criticals + warnings + unknowns + [exitmsg])}", file=sys.stdout, flush=True)
+    sys.exit(exitcode.value)
 
 
 def _ensure_protocols(
@@ -263,10 +277,10 @@ def _ensure_protocols(
                 found = True
                 if v.state != 'up':
                     _set_exitcode(code)
-                    _set_exitmsg(f"Protocol {pattern} is not up")
+                    _set_exitmsg(f"Protocol {pattern} is not up", code)
         if not found:
             _set_exitcode(code)
-            _set_exitmsg(f"Protocol {pattern} not found")
+            _set_exitmsg(f"Protocol {pattern} not found", code)
 
 
 def _ensure_bfd_sessions(
@@ -278,11 +292,11 @@ def _ensure_bfd_sessions(
         ip = ipaddress.ip_address(addr)
         if ip not in bfd_sessions.keys():
             _set_exitcode(code)
-            _set_exitmsg(f"BFD Session to {ip} not found")
+            _set_exitmsg(f"BFD Session to {ip} not found", code)
         else:
             if bfd_sessions[ip].state != 'up':
                 _set_exitcode(code)
-                _set_exitmsg(f"BFD Session to {ip} is not up")
+                _set_exitmsg(f"BFD Session to {ip} is not up", code)
 
 
 def main() -> None:
@@ -295,10 +309,13 @@ def main() -> None:
     if args.export_table is None:
         for table_required_arg in ('table_min', 'table_max', 'check_duplicates', 'print_duplicates'):
             if getattr(args, table_required_arg) not in (None, False):
-                print(f"ERROR: argument '{table_required_arg}' requires to specify the export table.",
+                msg = f"argument '{table_required_arg}' requires to specify the export table."
+                print(f"ERROR: {msg}",
                       file=sys.stderr, flush=True)
                 cli_parser.print_help()
-                _exit(Exitcode.unknown)
+                _set_exitcode(Exitcode.unknown)
+                _set_exitmsg(msg, Exitcode.unknown)
+                _exit()
 
     protocols = {}
     bfd_sessions = {}
@@ -328,10 +345,10 @@ def main() -> None:
     num_routes = len(routes)
     if args.table_min is not None and num_routes < args.table_min:
         _set_exitcode(Exitcode.warning)
-        _set_exitmsg(f"Table {args.export_table} only contains {num_routes} routes, expected at least {args.table_min}")
+        _set_exitmsg(f"Table {args.export_table} only contains {num_routes} routes, expected at least {args.table_min}", Exitcode.warning)
     if args.table_max is not None and num_routes > args.table_max:
         _set_exitcode(Exitcode.warning)
-        _set_exitmsg(f"Table {args.export_table} contains {num_routes} routes, expected at most {args.table_max}")
+        _set_exitmsg(f"Table {args.export_table} contains {num_routes} routes, expected at most {args.table_max}", Exitcode.warning)
 
     if args.protocols_warn is not None:
         _ensure_protocols(args.protocols_warn.split(','), protocols, Exitcode.warning)
@@ -350,12 +367,12 @@ def main() -> None:
                 print(f"Found {len(duplicate_routes)} duplicate routes:", file=sys.stderr, flush=True)
                 _print_route_list(duplicate_routes)
             _set_exitcode(Exitcode.warning)
-            _set_exitmsg(f"Found {len(duplicate_routes)} duplicate routes in table {args.export_table}")
+            _set_exitmsg(f"Found {len(duplicate_routes)} duplicate routes in table {args.export_table}", Exitcode.warning)
         else:
             if args.print_duplicates:
                 print(f"No duplicate routes found.", file=sys.stderr, flush=True)
+    _exit()
 
 
 if __name__ == '__main__':
-    status = main()
-    _exit(exitcode, exitmsg)
+    main()
