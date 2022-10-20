@@ -73,6 +73,16 @@ def _set_exitmsg(msg: str, code: Exitcode):
         UNKNOWNS.append(msg)
 
 
+def _exit() -> None:
+    global EXITCODE
+    global CRITICALS
+    global WARNINGS
+    global UNKNOWNS
+    global OKS
+    print(f"{EXITCODE.name.upper()}: {';'.join(CRITICALS + WARNINGS + UNKNOWNS + OKS)}", file=sys.stdout, flush=True)
+    sys.exit(EXITCODE.value)
+
+
 class BirdBFDSession():
     """BIRD BFD Session contextualized class."""
 
@@ -143,6 +153,14 @@ def _cli_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        '--export-table-base', '-T',
+        metavar='TABLE-BASE',
+        dest='export_table_base',
+        help="BIRD table name base used for exporting routes. "
+             "(both suffixes '4' and '6' will be taken into consideration)",
+    )
+
+    parser.add_argument(
         '--table-min', '-e',
         metavar='NUM',
         type=int,
@@ -190,8 +208,10 @@ def _run(cmdline: str, stdin=None, raise_err=True, expected_rc=0) -> str:
             raise RunCommandError(proc.stderr)
         return proc.stdout or ''
     except subprocess.CalledProcessError as ex:
+        _set_exitcode(Exitcode.UNKNOWN)
+        _set_exitmsg(f"query failed: {ex}", Exitcode.UNKNOWN)
         if raise_err:
-            raise RunCommandError(repr(ex)) from ex
+            _exit()
     return ''
 
 
@@ -254,8 +274,8 @@ def _parse_bird_routes(bird_output: str) -> TRouteList:
     return list(routes.items())
 
 
-def _bird_routes_in_table(table: str) -> TRouteList:
-    return _parse_bird_routes(_run(f'{BIRDC_PATH} show route all table {table}'))
+def _bird_routes_in_tables(tables: typing.List[str]) -> TRouteList:
+    return [s for t in tables for s in _parse_bird_routes(_run(f'{BIRDC_PATH} show route all table {t}'))]
 
 
 def _duplicate_routes(route_list: TRouteList) -> TRouteList:
@@ -270,16 +290,6 @@ def _print_route_list(route_list: TRouteList) -> None:
             print(f"{str(route):<15s} | {','.join([str(x) for x in nexthops])}")
         elif route.version == 6:
             print(f"{str(route):<36s} | {','.join([str(x) for x in nexthops])}")
-
-
-def _exit() -> None:
-    global EXITCODE
-    global CRITICALS
-    global WARNINGS
-    global UNKNOWNS
-    global OKS
-    print(f"{EXITCODE.name.upper()}: {';'.join(CRITICALS + WARNINGS + UNKNOWNS + OKS)}", file=sys.stdout, flush=True)
-    sys.exit(EXITCODE.value)
 
 
 def _ensure_protocols(
@@ -322,11 +332,11 @@ def _check_routes(args: argparse.Namespace, routes: TRouteList) -> None:
     num_routes = len(routes)
     if args.table_min is not None and num_routes < args.table_min:
         _set_exitcode(Exitcode.WARNING)
-        _set_exitmsg(f"Table {args.export_table} only contains {num_routes} routes, "
+        _set_exitmsg(f"Tables {args.export_tables} only contain {num_routes} routes, "
                      f"expected at least {args.table_min}", Exitcode.WARNING)
     if args.table_max is not None and num_routes > args.table_max:
         _set_exitcode(Exitcode.WARNING)
-        _set_exitmsg(f"Table {args.export_table} contains {num_routes} routes, "
+        _set_exitmsg(f"Tables {args.export_tables} contain {num_routes} routes, "
                      f"expected at most {args.table_max}", Exitcode.WARNING)
 
 
@@ -352,7 +362,7 @@ def _check_duplicate_routes(args: argparse.Namespace, routes: TRouteList) -> Non
                 print(f"Found {len(duplicate_routes)} duplicate routes:", file=sys.stderr, flush=True)
                 _print_route_list(duplicate_routes)
             _set_exitcode(Exitcode.WARNING)
-            _set_exitmsg(f"Found {len(duplicate_routes)} duplicate routes in table {args.export_table}",
+            _set_exitmsg(f"Found {len(duplicate_routes)} duplicate routes in tables {args.export_tables}",
                          Exitcode.WARNING)
         else:
             if args.print_duplicates:
@@ -365,7 +375,7 @@ def main() -> None:
     cli_parser = _cli_parser()
     args = cli_parser.parse_args()
 
-    if args.export_table is None:
+    if args.export_table is None and args.export_table_base is None:
         for table_required_arg in ('table_min', 'table_max', 'check_duplicates', 'print_duplicates'):
             if getattr(args, table_required_arg) not in (None, False):
                 msg = f"argument '{table_required_arg}' requires to specify the export table."
@@ -376,6 +386,11 @@ def main() -> None:
                 _set_exitmsg(msg, Exitcode.UNKNOWN)
                 _exit()
 
+    if args.export_table_base is not None:
+        args.export_tables = [f"{args.export_table_base}4", f"{args.export_table_base}6"]
+    else:
+        args.export_tables = [args.export_table]
+
     protocols = {}
     bfd_sessions = {}
     routes = []
@@ -385,9 +400,9 @@ def main() -> None:
         _exit()
 
     # fetch routes from the given export_table only if needed
-    routes_required = ('export_table', 'check_duplicates', 'print_duplicates')
+    routes_required = ('export_table', 'export_table_base', 'check_duplicates', 'print_duplicates')
     if any(getattr(args, x) not in (None, False) for x in routes_required):
-        routes = _bird_routes_in_table(args.export_table)
+        routes = _bird_routes_in_tables(args.export_tables)
 
     # fetch protocols only if needed
     protocols_required = ('protocols_warn', 'protocols_crit')
