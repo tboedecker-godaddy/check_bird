@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
+# pylint: disable=global-statement,global-variable-not-assigned,too-few-public-methods
+
+"""NRPE compatible monitoring script for BIRD.
+
+https://bird.network.cz/
+"""
 
 import argparse
-import dateutil.parser
 import enum
 import ipaddress
 import re
@@ -9,11 +14,12 @@ import shlex
 import subprocess
 import sys
 import typing
+import dateutil.parser
 
 
-t_IPAddr = typing.Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
-t_RouteTpl = typing.Tuple[t_IPAddr, typing.Set[t_IPAddr]]
-t_RouteList = typing.List[t_RouteTpl]
+TIPAddr = typing.Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+TRouteTpl = typing.Tuple[TIPAddr, typing.Set[TIPAddr]]
+TRouteList = typing.List[TRouteTpl]
 
 BIRDC_PATH = '/sbin/birdc'
 BIRDC_STATUS_OK = 'Daemon is up and running'
@@ -21,52 +27,57 @@ RE_ROUTE_BEGIN = re.compile(r'^(?P<route>.*?)\/(?P<cidr>32|128)')
 
 
 class RunCommandError(Exception):
-    """ thrown by run()/run_proc() if the command exited unexpectly """
+    """thrown by run()/run_proc() if the command exited unexpectly."""
 
 
 class Exitcode(enum.Enum):
-    ok = 0
-    warning = 1
-    critical = 2
-    unknown = 3
+    """Exitcode enum accoring to NRPE spec."""
+
+    OK = 0
+    WARNING = 1
+    CRITICAL = 2
+    UNKNOWN = 3
 
 
-exitcode = Exitcode.unknown
+EXITCODE = Exitcode.UNKNOWN
 
-oks = []
-criticals = []
-warnings = []
-unknowns = []
+OKS = []
+CRITICALS = []
+WARNINGS = []
+UNKNOWNS = []
 
 
 def _set_exitcode(code: Exitcode):
-    global exitcode
-    if code == Exitcode.critical:
-        exitcode = code
-    elif code == Exitcode.warning and exitcode != Exitcode.critical:
-        exitcode = code
-    elif code == Exitcode.unknown and exitcode not in (Exitcode.critical, Exitcode.warning):
-        exitcode = code
-    elif code == Exitcode.ok and exitcode not in (Exitcode.critical, Exitcode.warning, Exitcode.unknown):
-        exitcode = code
+    global EXITCODE
+    if code == Exitcode.CRITICAL:
+        EXITCODE = code
+    elif code == Exitcode.WARNING and EXITCODE != Exitcode.CRITICAL:
+        EXITCODE = code
+    elif code == Exitcode.UNKNOWN and EXITCODE not in (Exitcode.CRITICAL, Exitcode.WARNING):
+        EXITCODE = code
+    elif code == Exitcode.OK and EXITCODE not in (Exitcode.CRITICAL, Exitcode.WARNING, Exitcode.UNKNOWN):
+        EXITCODE = code
+
 
 def _set_exitmsg(msg: str, code: Exitcode):
-    global exitmsg
-    global criticals
-    global warnings
-    global unknowns
-    if code == Exitcode.critical:
-        criticals.append(msg)
-    elif code == Exitcode.warning:
-        warnings.append(msg)
-    elif code == Exitcode.ok:
-        oks.append(msg)
+    global CRITICALS
+    global WARNINGS
+    global UNKNOWNS
+    if code == Exitcode.CRITICAL:
+        CRITICALS.append(msg)
+    elif code == Exitcode.WARNING:
+        WARNINGS.append(msg)
+    elif code == Exitcode.OK:
+        OKS.append(msg)
     else:
-        unknowns.append(msg)
+        UNKNOWNS.append(msg)
 
 
 class BirdBFDSession():
+    """BIRD BFD Session contextualized class."""
+
     def __init__(self, line: str):
+        """Init."""
         fields = re.sub('[ \t]+', ' ', line).split(' ')
         self.ip_addr = ipaddress.ip_address(fields[0])
         self.iface = fields[1].lower()
@@ -77,7 +88,10 @@ class BirdBFDSession():
 
 
 class BirdProtocol():
+    """BIRD Protocol contextualized class."""
+
     def __init__(self, line: str):
+        """Init."""
         fields = re.sub('[ \t]+', ' ', line).split(' ')
         self.name = fields[0]
         self.proto = fields[1].lower()
@@ -178,26 +192,22 @@ def _run(cmdline: str, stdin=None, raise_err=True, expected_rc=0) -> str:
     except subprocess.CalledProcessError as ex:
         if raise_err:
             raise RunCommandError(repr(ex)) from ex
-        else:
-            pass
     return ''
 
 
 def _bird_status() -> bool:
-    global exitcode
-    global exitmsg
+    global EXITCODE
     try:
         output = _run(f'{BIRDC_PATH} show status')
         statusline = output.strip("\n").splitlines()[-1]
         if BIRDC_STATUS_OK in statusline:
-            _set_exitmsg(BIRDC_STATUS_OK, Exitcode.ok)
-            exitcode = Exitcode.ok
+            _set_exitmsg(BIRDC_STATUS_OK, Exitcode.OK)
+            EXITCODE = Exitcode.OK
             return True
-        else:
-            raise RunCommandError()
+        raise RunCommandError()
     except RunCommandError:
-        _set_exitcode(Exitcode.critical)
-        _set_exitmsg('BIRD is NOT running', Exitcode.critical)
+        _set_exitcode(Exitcode.CRITICAL)
+        _set_exitmsg('BIRD is NOT running', Exitcode.CRITICAL)
         return False
 
 
@@ -210,7 +220,7 @@ def _bird_protocols() -> typing.Dict[str, BirdProtocol]:
     return protocols
 
 
-def _bird_bfd_sessions() -> typing.Dict[t_IPAddr, BirdBFDSession]:
+def _bird_bfd_sessions() -> typing.Dict[TIPAddr, BirdBFDSession]:
     sessions = {}
     output = _run(f'{BIRDC_PATH} show bfd sessions')
     for line in output.splitlines()[3:]:
@@ -219,9 +229,9 @@ def _bird_bfd_sessions() -> typing.Dict[t_IPAddr, BirdBFDSession]:
     return sessions
 
 
-def _parse_bird_routes(bird_output: str) -> t_RouteList:
+def _parse_bird_routes(bird_output: str) -> TRouteList:
     routes = {}
-    current = None
+    current: typing.Union[TRouteTpl, typing.Tuple[None, None]] = (None, None)
     for line in bird_output.strip("\n").splitlines()[2:]:
         m_begin = RE_ROUTE_BEGIN.match(line)
         if m_begin:
@@ -233,27 +243,29 @@ def _parse_bird_routes(bird_output: str) -> t_RouteList:
             current = (route, nexthops)
         else:
             if line.startswith('\tBGP.next_hop'):
-                assert current is not None
+                assert current is not (None, None)
                 _, _nexthop = line.strip().split(': ', 2)
                 assert _nexthop not in ('', None)
                 nexthop = ipaddress.ip_address(_nexthop)
-                current[1].add(nexthop)
+                _, rt_nhs = typing.cast(TRouteTpl, current)
+                rt_nhs.add(nexthop)
 
-    return [(k, v) for k,v in routes.items()]
+    # return [(k, v) for k,v in routes.items()]
+    return list(routes.items())
 
 
-def _bird_routes_in_table(table: str) -> t_RouteList:
+def _bird_routes_in_table(table: str) -> TRouteList:
     return _parse_bird_routes(_run(f'{BIRDC_PATH} show route all table {table}'))
 
 
-def _duplicate_routes(route_list: t_RouteList) -> t_RouteList:
+def _duplicate_routes(route_list: TRouteList) -> TRouteList:
     return sorted([x for x in route_list if len(x[1]) > 1], key=lambda x: int(x[0]))
 
 
-def _print_route_list(route_list: t_RouteList) -> None:
+def _print_route_list(route_list: TRouteList) -> None:
     for rtpl in route_list:
         route = rtpl[0]
-        nexthops = sorted(list(rtpl[1]), key=lambda n: int(n))
+        nexthops = sorted(list(rtpl[1]), key=int)
         if route.version == 4:
             print(f"{str(route):<15s} | {','.join([str(x) for x in nexthops])}")
         elif route.version == 6:
@@ -261,14 +273,13 @@ def _print_route_list(route_list: t_RouteList) -> None:
 
 
 def _exit() -> None:
-    global exitcode
-    global exitmsg
-    global criticals
-    global warnings
-    global unknowns
-    global oks
-    print(f"{exitcode.name.upper()}: {';'.join(criticals + warnings + unknowns + oks)}", file=sys.stdout, flush=True)
-    sys.exit(exitcode.value)
+    global EXITCODE
+    global CRITICALS
+    global WARNINGS
+    global UNKNOWNS
+    global OKS
+    print(f"{EXITCODE.name.upper()}: {';'.join(CRITICALS + WARNINGS + UNKNOWNS + OKS)}", file=sys.stdout, flush=True)
+    sys.exit(EXITCODE.value)
 
 
 def _ensure_protocols(
@@ -280,12 +291,12 @@ def _ensure_protocols(
         found = False
         pattern_re = re.compile(re.sub('[*]+', '[a-zA-Z0-9_]*', pattern))
 
-        for k, v in protocols.items():
-            if pattern_re.match(k):
+        for name, proto in protocols.items():
+            if pattern_re.match(name):
                 found = True
-                if v.state != 'up':
+                if proto.state != 'up':
                     _set_exitcode(code)
-                    _set_exitmsg(f"Protocol {v.name} is not up", code)
+                    _set_exitmsg(f"Protocol {proto.name} is not up", code)
         if not found:
             _set_exitcode(code)
             _set_exitmsg(f"Protocol {pattern} not found", code)
@@ -293,24 +304,64 @@ def _ensure_protocols(
 
 def _ensure_bfd_sessions(
     addr_list: typing.List[str],
-    bfd_sessions: typing.Dict[t_IPAddr, BirdBFDSession],
+    bfd_sessions: typing.Dict[TIPAddr, BirdBFDSession],
     code: Exitcode
 ) -> None:
     for addr in addr_list:
-        ip = ipaddress.ip_address(addr)
-        if ip not in bfd_sessions.keys():
+        ip_addr = ipaddress.ip_address(addr)
+        if ip_addr not in bfd_sessions.keys():
             _set_exitcode(code)
-            _set_exitmsg(f"BFD Session to {ip} not found", code)
+            _set_exitmsg(f"BFD Session to {ip_addr} not found", code)
         else:
-            if bfd_sessions[ip].state != 'up':
+            if bfd_sessions[ip_addr].state != 'up':
                 _set_exitcode(code)
-                _set_exitmsg(f"BFD Session to {ip} is not up", code)
+                _set_exitmsg(f"BFD Session to {ip_addr} is not up", code)
+
+
+def _check_routes(args: argparse.Namespace, routes: TRouteList) -> None:
+    num_routes = len(routes)
+    if args.table_min is not None and num_routes < args.table_min:
+        _set_exitcode(Exitcode.WARNING)
+        _set_exitmsg(f"Table {args.export_table} only contains {num_routes} routes, "
+                     f"expected at least {args.table_min}", Exitcode.WARNING)
+    if args.table_max is not None and num_routes > args.table_max:
+        _set_exitcode(Exitcode.WARNING)
+        _set_exitmsg(f"Table {args.export_table} contains {num_routes} routes, "
+                     f"expected at most {args.table_max}", Exitcode.WARNING)
+
+
+def _check_protocols(args: argparse.Namespace, protocols: typing.Dict[str, BirdProtocol]) -> None:
+    if args.protocols_warn is not None:
+        _ensure_protocols(args.protocols_warn.split(','), protocols, Exitcode.WARNING)
+    if args.protocols_crit is not None:
+        _ensure_protocols(args.protocols_crit.split(','), protocols, Exitcode.CRITICAL)
+
+
+def _check_bfd_sessions(args: argparse.Namespace, bfd_sessions: typing.Dict[TIPAddr, BirdBFDSession]) -> None:
+    if args.bfd_warn is not None:
+        _ensure_bfd_sessions(args.bfd_warn.split(','), bfd_sessions, Exitcode.WARNING)
+    if args.bfd_crit is not None:
+        _ensure_bfd_sessions(args.bfd_crit.split(','), bfd_sessions, Exitcode.CRITICAL)
+
+
+def _check_duplicate_routes(args: argparse.Namespace, routes: TRouteList) -> None:
+    if args.print_duplicates or args.check_duplicates:
+        duplicate_routes = _duplicate_routes(routes)
+        if duplicate_routes:
+            if args.print_duplicates:
+                print(f"Found {len(duplicate_routes)} duplicate routes:", file=sys.stderr, flush=True)
+                _print_route_list(duplicate_routes)
+            _set_exitcode(Exitcode.WARNING)
+            _set_exitmsg(f"Found {len(duplicate_routes)} duplicate routes in table {args.export_table}",
+                         Exitcode.WARNING)
+        else:
+            if args.print_duplicates:
+                print("No duplicate routes found.", file=sys.stderr, flush=True)
 
 
 def main() -> None:
-    """ main entry point """
-    global exitcode
-    global exitmsg
+    """."""
+    global EXITCODE
     cli_parser = _cli_parser()
     args = cli_parser.parse_args()
 
@@ -321,8 +372,8 @@ def main() -> None:
                 print(f"ERROR: {msg}",
                       file=sys.stderr, flush=True)
                 cli_parser.print_help()
-                _set_exitcode(Exitcode.unknown)
-                _set_exitmsg(msg, Exitcode.unknown)
+                _set_exitcode(Exitcode.UNKNOWN)
+                _set_exitmsg(msg, Exitcode.UNKNOWN)
                 _exit()
 
     protocols = {}
@@ -335,50 +386,24 @@ def main() -> None:
 
     # fetch routes from the given export_table only if needed
     routes_required = ('export_table', 'check_duplicates', 'print_duplicates')
-    if any([getattr(args, x) not in (None, False) for x in routes_required]):
+    if any(getattr(args, x) not in (None, False) for x in routes_required):
         routes = _bird_routes_in_table(args.export_table)
 
     # fetch protocols only if needed
     protocols_required = ('protocols_warn', 'protocols_crit')
-    if any([getattr(args, x) not in (None, False) for x in protocols_required]):
+    if any(getattr(args, x) not in (None, False) for x in protocols_required):
         protocols = _bird_protocols()
 
     # fetch bfd sessions only if needed
     bfd_sessions_required = ('bfd_warn', 'bfd_crit')
-    if any([getattr(args, x) not in (None, False) for x in bfd_sessions_required]):
+    if any(getattr(args, x) not in (None, False) for x in bfd_sessions_required):
         bfd_sessions = _bird_bfd_sessions()
 
     # proceed with the actual checks
-
-    num_routes = len(routes)
-    if args.table_min is not None and num_routes < args.table_min:
-        _set_exitcode(Exitcode.warning)
-        _set_exitmsg(f"Table {args.export_table} only contains {num_routes} routes, expected at least {args.table_min}", Exitcode.warning)
-    if args.table_max is not None and num_routes > args.table_max:
-        _set_exitcode(Exitcode.warning)
-        _set_exitmsg(f"Table {args.export_table} contains {num_routes} routes, expected at most {args.table_max}", Exitcode.warning)
-
-    if args.protocols_warn is not None:
-        _ensure_protocols(args.protocols_warn.split(','), protocols, Exitcode.warning)
-    if args.protocols_crit is not None:
-        _ensure_protocols(args.protocols_crit.split(','), protocols, Exitcode.critical)
-
-    if args.bfd_warn is not None:
-        _ensure_bfd_sessions(args.bfd_warn.split(','), bfd_sessions, Exitcode.warning)
-    if args.bfd_crit is not None:
-        _ensure_bfd_sessions(args.bfd_crit.split(','), bfd_sessions, Exitcode.critical)
-
-    if args.print_duplicates or args.check_duplicates:
-        duplicate_routes = _duplicate_routes(routes)
-        if duplicate_routes:
-            if args.print_duplicates:
-                print(f"Found {len(duplicate_routes)} duplicate routes:", file=sys.stderr, flush=True)
-                _print_route_list(duplicate_routes)
-            _set_exitcode(Exitcode.warning)
-            _set_exitmsg(f"Found {len(duplicate_routes)} duplicate routes in table {args.export_table}", Exitcode.warning)
-        else:
-            if args.print_duplicates:
-                print(f"No duplicate routes found.", file=sys.stderr, flush=True)
+    _check_routes(args, routes)
+    _check_protocols(args, protocols)
+    _check_bfd_sessions(args, bfd_sessions)
+    _check_duplicate_routes(args, routes)
 
     _exit()
 
