@@ -263,7 +263,7 @@ def _parse_bird_routes(bird_output: str) -> TRouteList:
             current = (route, nexthops)
         else:
             if line.startswith('\tBGP.next_hop'):
-                assert current is not (None, None)
+                assert current != (None, None)
                 _, _nexthop = line.strip().split(': ', 2)
                 assert _nexthop not in ('', None)
                 nexthop = ipaddress.ip_address(_nexthop)
