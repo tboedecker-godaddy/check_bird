@@ -9,6 +9,7 @@ https://bird.network.cz/
 import argparse
 import enum
 import ipaddress
+import pathlib
 import re
 import shlex
 import subprocess
@@ -120,34 +121,39 @@ def _cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--protocols-warn', '-p',
         metavar='PATTERN-LIST',
+        type=str,
         dest='protocols_warn',
-        help='Warning if any of the given protocols is down (comma separated list)',
+        help='Warning if any of the given protocols is down (comma separated list).',
     )
 
     parser.add_argument(
         '--protocols-crit', '-P',
         metavar='PATTERN-LIST',
+        type=str,
         dest='protocols_crit',
-        help='Critical if any of the given protocols is down (comma separated list)',
+        help='Critical if any of the given protocols is down (comma separated list).',
     )
 
     parser.add_argument(
         '--bfd-warn', '-b',
         metavar='IPADDR-LIST',
+        type=str,
         dest='bfd_warn',
-        help='Warning if any of the given BFD sessions is down (comma separated list)',
+        help='Warning if any of the given BFD sessions is down (comma separated list).',
     )
 
     parser.add_argument(
         '--bfd-crit', '-B',
         metavar='IPADDR-LIST',
+        type=str,
         dest='bfd_crit',
-        help='Critical if any of the given BFD sessions is down (comma separated list)',
+        help='Critical if any of the given BFD sessions is down (comma separated list).',
     )
 
     parser.add_argument(
         '--export-table', '-t',
         metavar='TABLE-NAME',
+        type=str,
         dest='export_table',
         help='BIRD table name used for exporting routes',
     )
@@ -155,6 +161,7 @@ def _cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--export-table-base', '-T',
         metavar='TABLE-BASE',
+        type=str,
         dest='export_table_base',
         help="BIRD table name base used for exporting routes. "
              "(both suffixes '4' and '6' will be taken into consideration)",
@@ -188,6 +195,22 @@ def _cli_parser() -> argparse.ArgumentParser:
         action='store_true',
         dest='print_duplicates',
         help='Print duplicate routes in the selected export table.',
+    )
+
+    parser.add_argument(
+        '--exclude-duplicates', '-x',
+        metavar='IPADDR-LIST',
+        type=str,
+        dest='exclude_duplicates',
+        help='Exclude the given IPs from the duplicate route detection (comma separated list).',
+    )
+
+    parser.add_argument(
+        '--exclude-duplicates-file', '-X',
+        metavar='IPADDR-LIST-FILE',
+        type=pathlib.Path,
+        dest='exclude_duplicates_file',
+        help='Exclude the given IPs from the duplicate route detection (textfile, one IPADDR per line).',
     )
 
     return parser
@@ -278,8 +301,9 @@ def _bird_routes_in_tables(tables: typing.List[str]) -> TRouteList:
     return [s for t in tables for s in _parse_bird_routes(_run(f'{BIRDC_PATH} show route all table {t}'))]
 
 
-def _duplicate_routes(route_list: TRouteList) -> TRouteList:
-    return sorted([x for x in route_list if len(x[1]) > 1], key=lambda x: int(x[0]))
+def _duplicate_routes(route_list: TRouteList, exclude: typing.Union[typing.List[TIPAddr], None] = None) -> TRouteList:
+    s_exclude = set(exclude or [])
+    return sorted([x for x in route_list if len(x[1]) > 1 and x[0] not in s_exclude], key=lambda x: int(x[0]))
 
 
 def _print_route_list(route_list: TRouteList) -> None:
@@ -356,7 +380,29 @@ def _check_bfd_sessions(args: argparse.Namespace, bfd_sessions: typing.Dict[TIPA
 
 def _check_duplicate_routes(args: argparse.Namespace, routes: TRouteList) -> None:
     if args.print_duplicates or args.check_duplicates:
-        duplicate_routes = _duplicate_routes(routes)
+        dup_excludes_raw = []
+        dup_excludes = []
+
+        if args.exclude_duplicates is not None:
+            for addr in args.exclude_duplicates.split(','):
+                dup_excludes_raw.append(addr)
+
+        exclude_file = args.exclude_duplicates_file
+        if exclude_file is not None and exclude_file.exists():
+            for addr in exclude_file.read_text().strip("\n").splitlines():
+                dup_excludes_raw.append(addr)
+
+        for addr in dup_excludes_raw:
+            try:
+                dup_excludes.append(ipaddress.ip_address(addr))
+            except ValueError as ex:
+                msg = f"'{addr}' is not a valid IP address: {ex}"
+                print(f"ERROR: {msg}", file=sys.stderr, flush=True)
+                _set_exitcode(Exitcode.UNKNOWN)
+                _set_exitmsg(msg, Exitcode.UNKNOWN)
+                _exit()
+
+        duplicate_routes = _duplicate_routes(routes, dup_excludes)
         if duplicate_routes:
             if args.print_duplicates:
                 print(f"Found {len(duplicate_routes)} duplicate routes:", file=sys.stderr, flush=True)
